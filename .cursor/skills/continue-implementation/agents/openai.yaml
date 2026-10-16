@@ -1,0 +1,4 @@
+interface:
+  display_name: "Continue Implementation"
+  short_description: "Resume interrupted work and pending verification"
+  default_prompt: "Use $continue-implementation to resume my interrupted implementation."

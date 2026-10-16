@@ -1,0 +1,6 @@
+interface:
+  display_name: "Prepare Plan"
+  short_description: "Plan one task with memory, OKRs, and a module mockup"
+  default_prompt: "Use $prepare-plan to plan my task in Cursor Plan mode."
+policy:
+  allow_implicit_invocation: false
