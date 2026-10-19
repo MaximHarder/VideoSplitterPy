@@ -1,0 +1,22 @@
+[project]
+name = "videosplitter"
+version = "0.1.0"
+description = "Split videos with FFmpeg"
+requires-python = ">=3.11"
+dependencies = [
+    "cyclopts>=3",
+    "pyyaml>=6",
+]
+
+[project.scripts]
+videosplitter = "videosplitter.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14"]
+build-backend = "uv_build"
