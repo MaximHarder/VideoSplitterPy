@@ -1,7 +1,22 @@
 [project]
 name = "videosplitter"
 version = "0.1.0"
-description = "Split videos with FFmpeg"
+description = "Split videos into parts with FFmpeg, without re-encoding"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Maxim Harder" }]
+keywords = ["ffmpeg", "video", "split"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Video",
+]
 requires-python = ">=3.11"
 dependencies = [
     "cyclopts>=3",
@@ -10,6 +25,12 @@ dependencies = [
     "textual>=8.2.8",
     "tqdm>=4.70.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/MaximHarder/VideoSplitterPy"
+Documentation = "https://github.com/MaximHarder/VideoSplitterPy/tree/main/docs"
+Repository = "https://github.com/MaximHarder/VideoSplitterPy"
+Issues = "https://github.com/MaximHarder/VideoSplitterPy/issues"
 
 [project.scripts]
 videosplitter = "videosplitter.cli:main"
