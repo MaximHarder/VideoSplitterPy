@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from videosplitter.ffmpeg import drawtext, font_file, screenshot_instant
+from videosplitter.ffmpeg import draw_label, font_file, screenshot_instant
 from videosplitter.planner import Profile
 
 
@@ -12,7 +12,7 @@ def profile(**kwargs):
         min_part_minutes=1, name_template="{video_name}.{ext}",
         create_screenshot=True, screenshot_time="50% of the part",
         screenshot_name="{video_name}_p{part|pad(2)}", screenshot_format="jpg",
-        write_label=True, label_template="{part},[is_final][/is_final],{file_name}",
+        write_label=True, label_template="[is_last]Final[else]PART {part}[/is_last]",
         label_font="Times New Roman", label_size_px=13, label_color="white",
         label_position=(("bottom", 15), ("right", 5)), label_border_px=2,
         label_border_color="black",
@@ -34,28 +34,33 @@ def test_percent_out_of_range():
         screenshot_instant("101% of the part", part_start=0, part_end=1, video_end=1, random_at=None)
 
 
-def test_plain_frame_has_no_drawtext():
+def test_plain_frame_scales_to_display_and_has_no_drawtext():
     from videosplitter.ffmpeg import screenshot_command
 
     cmd = screenshot_command(
         ffmpeg="ffmpeg", source=Path("a.mp4"), dest=Path("a.jpg"), instant=2.5, vf=None,
     )
-    assert "-vf" not in cmd
+    vf = cmd[cmd.index("-vf") + 1]
+    assert vf == "scale=iw*sar:ih,setsar=1"
+    assert "drawtext" not in vf
     assert cmd[cmd.index("-ss") + 1] == "2.500000"
 
 
 def test_label_and_plain_font(tmp_path: Path):
-    font = tmp_path / "font.ttf"
-    font.write_bytes(b"font")
-    sample = profile(label_font=str(font))
-    labeled = drawtext("1,,Holiday", sample, str(font))
-    assert labeled.startswith("drawtext=")
-    assert "fontsize=13" in labeled
-    assert "fontcolor=white" in labeled
-    assert "borderw=2" in labeled
-    assert "bordercolor=black" in labeled
-    assert "y=h-th-15" in labeled
-    assert "x=w-tw-5" in labeled
-    assert font_file(str(font)) == str(font)
+    from PIL import Image
+
+    font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    sample = profile(label_font=font, label_color="black", label_border_px=0, label_position=(("top", 4), ("left", 4)))
+    dest = tmp_path / "shot.png"
+    Image.new("RGB", (200, 80), "white").save(dest)
+    before = dest.read_bytes()
+    draw_label(dest, "PART 1", sample, font)
+    assert dest.read_bytes() != before
+    fake = tmp_path / "font.ttf"
+    fake.write_bytes(b"font")
+    assert font_file(str(fake)) == str(fake)
+    assert Path(font_file("DejaVu Sans")).is_file()
+    from videosplitter.ffmpeg import system_fonts
+    assert "DejaVu Sans" in system_fonts()
     with pytest.raises(Exception, match="font not found"):
         font_file(str(tmp_path / "missing.ttf"))

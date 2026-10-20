@@ -8,9 +8,6 @@ from videosplitter.store import ensure, load_profile
 
 
 def test_command_and_wizard_same_plan(tmp_path: Path, monkeypatch):
-    import io
-    import sys
-
     from tests.support import write_stub
     from videosplitter.cli import command, wizard
 
@@ -21,7 +18,7 @@ def test_command_and_wizard_same_plan(tmp_path: Path, monkeypatch):
     )
     (root / "settings.yml").write_text(text, encoding="utf-8")
     profile = (root / "profiles" / "default.yml").read_text(encoding="utf-8").replace(
-        "min_part_minutes: 1", "min_part_minutes: 0.01"
+        "min_part_minutes: 8", "min_part_minutes: 0.01"
     )
     (root / "profiles" / "default.yml").write_text(profile, encoding="utf-8")
     monkeypatch.setenv("VIDEOSPLITTER_CONFIG", str(root))
@@ -38,8 +35,7 @@ def test_command_and_wizard_same_plan(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr("videosplitter.cli.plan", spy)
     assert command(str(source), split_by="size", split_size=1e-7) == 0
-    monkeypatch.setattr(sys, "stdin", io.StringIO(f"{source}\n\ny\nsize\n1e-7\n\n"))
-    assert wizard() == 0
+    assert wizard([str(source), "", "y", "size", "1e-7", ""]) == 0
     assert seen[0] == seen[1]
     assert len(seen[0]) > 1
 
@@ -66,15 +62,15 @@ def test_argv_flags(tmp_path: Path, monkeypatch):
 def test_flags_and_wizard_match(tmp_path: Path):
     root = ensure(tmp_path / "cfg")
     base = load_profile(root, "default")
-    flags = Request(Path("movie.mp4"), False, False, "D:/out", "default", "size", 100, None, None, None, None)
+    flags = Request(Path("movie.mp4"), False, None, "D:/out", "default", "size", 100, None, None, None, None)
     answers = answers_to_request(
         ["movie.mp4", "default", "y", "size", "100", "D:/out"],
         exists=lambda path: True,
         is_dir=lambda path: False,
     )
     assert answers == flags
-    left = plan(apply_override(base, flags), 100, 200 * 1024 * 1024)
-    right = plan(apply_override(base, answers), 100, 200 * 1024 * 1024)
+    left = plan(apply_override(base, flags), 1000, 200 * 1024 * 1024)
+    right = plan(apply_override(base, answers), 1000, 200 * 1024 * 1024)
     assert left == right
     assert len(left) == 2
 
@@ -100,13 +96,32 @@ def test_invalid_answer(tmp_path: Path, capsys):
     assert "invalid answer" in capsys.readouterr().err
 
 
-def test_file_prompts(monkeypatch, capsys):
-    import io
-    import sys
+def test_empty_path_rejected(capsys):
     from videosplitter.cli import wizard
 
-    monkeypatch.setattr(sys, "stdin", io.StringIO("movie.mp4\n\nn\n\n"))
-    assert wizard() == 2
-    err = capsys.readouterr().err
-    assert err.index("Path: ") < err.index("Profile name") < err.index("Override split mode?") < err.index("Output directory")
-    assert "Include subfolders?" not in err
+    assert wizard([""]) == 2
+    captured = capsys.readouterr()
+    assert "path not found" in captured.err
+
+
+def test_bare_app_calls_wizard(monkeypatch):
+    from videosplitter.cli import app
+
+    called = []
+
+    def spy():
+        called.append(True)
+        return 0
+
+    monkeypatch.setattr("videosplitter.cli.wizard", spy)
+    with pytest.raises(SystemExit) as caught:
+        app([], exit_on_error=False)
+    assert caught.value.code == 0
+    assert called
+
+
+def test_wizard_none_runs_tui(monkeypatch):
+    from videosplitter.cli import wizard
+
+    monkeypatch.setattr("videosplitter.tui.app.run_tui", lambda: 0)
+    assert wizard() == 0

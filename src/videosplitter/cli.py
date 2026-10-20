@@ -1,20 +1,32 @@
-"""Flags, wizard, and the per-video run."""
+"""Flags, wizard TUI, and the per-video run."""
 
 from __future__ import annotations
 
 import os
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from cyclopts import App, Parameter
+from tqdm import tqdm
+from tqdm.std import TqdmDefaultWriteLock
 from typing import Annotated
+
+# The multiprocessing lock opens a semaphore. subprocess then raises
+# "bad value(s) in fds_to_keep", especially under the text UI.
+def _skip_mp_lock(cls) -> None:
+    cls.mp_lock = None
+
+
+TqdmDefaultWriteLock.create_mp_lock = classmethod(_skip_mp_lock)
+tqdm.monitor_interval = 0
 
 from videosplitter import __version__
 from videosplitter.ffmpeg import (
     FfmpegError,
-    drawtext,
+    draw_label,
     ffprobe_bin,
     font_file,
     probe_duration,
@@ -25,7 +37,7 @@ from videosplitter.ffmpeg import (
 )
 from videosplitter.names import NameError, render, validate_template
 from videosplitter.planner import PlanError, Profile, plan
-from videosplitter.store import ConfigError, ensure, load_profile, load_settings, temp_path
+from videosplitter.store import ConfigError, ensure, expand_path_template, load_profile, load_settings, temp_path
 
 app = App(name="videosplitter", version=__version__, help="Split a video into parts.")
 
@@ -34,7 +46,7 @@ app = App(name="videosplitter", version=__version__, help="Split a video into pa
 class Request:
     path: Path | None
     bulk: bool
-    subfolders: bool
+    subfolders: bool | None
     output: str | None
     profile_name: str | None
     split_by: str | None
@@ -108,18 +120,48 @@ def collect(path: Path, *, bulk: bool, subfolders: bool, extensions: tuple[str, 
     )
 
 
-def _output_dir(file: Path, request: Request, output_dir: str) -> Path:
+def _output_dir(file: Path, request: Request, output_dir: str, *, use_subfolders: bool) -> Path:
     if request.output:
         base = Path(request.output)
     else:
-        token = str(request.path if request.bulk else file.parent)
-        base = Path(output_dir.replace("{source_dir}", token))
-    if request.bulk and request.subfolders and request.path is not None:
+        token = Path(request.path if request.bulk else file.parent)
+        base = expand_path_template(output_dir, token)
+    if request.bulk and use_subfolders and request.path is not None:
         return base / file.parent.relative_to(request.path)
     return base
 
 
-def execute(request: Request, *, config: Path | None = None, random_at: float | None = None) -> int:
+class _BarSink:
+    """tqdm writes \\r updates. Forward each finished line to the TUI."""
+
+    def __init__(self, emit: Callable[[str], None]) -> None:
+        self.emit = emit
+
+    def write(self, text: str) -> int:
+        for piece in text.replace("\r", "\n").split("\n"):
+            line = piece.strip()
+            if line:
+                self.emit(line)
+        return len(text)
+
+    def flush(self) -> None:
+        return None
+
+
+def _progress(on_progress: Callable[[str], None] | None, line: str, *, err: bool = False) -> None:
+    if on_progress is not None:
+        on_progress(line)
+        return
+    print(line, file=sys.stderr if err else sys.stdout)
+
+
+def execute(
+    request: Request,
+    *,
+    config: Path | None = None,
+    random_at: float | None = None,
+    on_progress: Callable[[str], None] | None = None,
+) -> int:
     if config is None and os.environ.get("VIDEOSPLITTER_CONFIG"):
         config = Path(os.environ["VIDEOSPLITTER_CONFIG"])
     try:
@@ -143,75 +185,110 @@ def execute(request: Request, *, config: Path | None = None, random_at: float | 
     if request.subfolders and not request.bulk:
         print("--subfolders requires --bulk", file=sys.stderr)
         return 2
-    files = collect(path, bulk=request.bulk, subfolders=request.subfolders, extensions=settings.extensions)
+    use_sub = request.subfolders if request.subfolders is not None else (settings.recursive_search if request.bulk else False)
+    files = collect(path, bulk=request.bulk, subfolders=use_sub, extensions=settings.extensions)
     if request.bulk and not files:
         print("no videos")
         return 0
     failed = False
-    for file in files:
-        if not _one(file, request, settings, profile, random_at):
-            failed = True
+    bar_file = sys.stderr if on_progress is None else _BarSink(on_progress)
+    with tqdm(total=len(files), desc="files", file=bar_file, leave=True, mininterval=0, ascii=True, ncols=80) as files_bar:
+        for file in files:
+            files_bar.set_postfix_str(file.name, refresh=False)
+            if not _one(file, request, settings, profile, random_at, use_sub, on_progress, bar_file):
+                failed = True
+            files_bar.update(1)
     return 1 if failed else 0
 
 
-def _one(file: Path, request: Request, settings, profile: Profile, random_at: float | None) -> bool:
+def _one(
+    file: Path,
+    request: Request,
+    settings,
+    profile: Profile,
+    random_at: float | None,
+    use_sub: bool,
+    on_progress: Callable[[str], None] | None,
+    bar_file,
+) -> bool:
     try:
         duration = probe_duration(ffprobe_bin(settings.ffmpeg), file)
         parts = plan(profile, duration, file.stat().st_size)
     except FfmpegError as exc:
-        print(f"fail {file}: {exc}", file=sys.stderr)
+        _progress(on_progress, f"fail {file}: {exc}", err=True)
         return False
     except PlanError as exc:
-        print(f"fail {file}: {exc}", file=sys.stderr)
+        _progress(on_progress, f"fail {file}: {exc}", err=True)
         return False
     if not parts:
-        print(f"skip {file}")
+        _progress(on_progress, f"skip {file}")
         return True
-    out = _output_dir(file, request, settings.output_dir)
+    out = _output_dir(file, request, settings.output_dir, use_subfolders=use_sub)
     try:
         out.mkdir(parents=True, exist_ok=True)
     except OSError:
-        print(f"fail {file}: cannot create output", file=sys.stderr)
+        _progress(on_progress, f"fail {file}: cannot create output", err=True)
         return False
     wrote_new = False
-    for part in parts:
-        final = part.index == len(parts)
-        ext = file.suffix.lstrip(".")
-        try:
-            part_name = render(profile.name_template, video_name=file.stem, ext=ext, part=part.index, parts=len(parts), is_final=final)
-            status = write_part(
-                ffmpeg=settings.ffmpeg, source=file, dest=out / part_name,
-                start=part.start, end=part.end, temp_dir=temp_path(settings), replace=settings.replace_existing,
-            )
-            if status == "wrote":
-                wrote_new = True
-            if profile.create_screenshot:
-                _shot(file, out, profile, part, len(parts), duration, settings.ffmpeg, random_at, settings.replace_existing)
-        except (FfmpegError, NameError) as exc:
-            print(f"fail {file}: {exc}", file=sys.stderr)
-            return False
+    source_dir = str(file.parent)
+    temp = temp_path(settings, file.parent)
+    try:
+        temp.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        _progress(on_progress, f"fail {file}: cannot create temp", err=True)
+        return False
+    with tqdm(total=len(parts), desc="parts", file=bar_file, leave=False, mininterval=0, ascii=True, ncols=80) as part_bar:
+        for part in parts:
+            part_bar.set_postfix_str(file.name, refresh=False)
+            part_bar.update(1)
+            final = part.index == len(parts)
+            ext = file.suffix.lstrip(".")
+            try:
+                part_name = render(
+                    profile.name_template,
+                    video_name=file.stem, ext=ext, part=part.index, parts=len(parts),
+                    is_final=final, source_path=source_dir,
+                )
+                status = write_part(
+                    ffmpeg=settings.ffmpeg, source=file, dest=out / part_name,
+                    start=part.start, end=part.end, temp_dir=temp, replace=settings.replace_existing,
+                )
+                if status == "wrote":
+                    wrote_new = True
+                if profile.create_screenshot:
+                    _shot(file, out, profile, part, len(parts), duration, settings.ffmpeg, random_at, settings.replace_existing, source_dir)
+            except (FfmpegError, NameError) as exc:
+                _progress(on_progress, f"fail {file}: {exc}", err=True)
+                return False
     if wrote_new and settings.remove_source:
         file.unlink()
-    print(f"wrote {file}")
+    _progress(on_progress, f"wrote {file}")
     return True
 
 
-def _shot(file, out, profile, part, count, duration, ffmpeg, random_at, replace: bool) -> None:
+def _shot(file, out, profile, part, count, duration, ffmpeg, random_at, replace: bool, source_dir: str) -> None:
     if profile.screenshot_format not in {"jpg", "png", "webp"}:
         raise FfmpegError("screenshot failed")
     final = part.index == count
     ext = file.suffix.lstrip(".")
-    stem = render(profile.screenshot_name, video_name=file.stem, ext=ext, part=part.index, parts=count, is_final=final)
+    stem = render(
+        profile.screenshot_name,
+        video_name=file.stem, ext=ext, part=part.index, parts=count,
+        is_final=final, source_path=source_dir,
+    )
     dest = out / f"{stem}.{profile.screenshot_format}"
     instant = screenshot_instant(
         profile.screenshot_time, part_start=part.start, part_end=part.end,
         video_end=duration, random_at=random_at,
     )
-    vf = None
+    write_screenshot(ffmpeg=ffmpeg, source=file, dest=dest, instant=instant, vf=None, replace=replace)
     if profile.write_label:
-        text = render(profile.label_template, video_name=file.stem, ext=ext, part=part.index, parts=count, is_final=final)
-        vf = drawtext(text, profile, font_file(profile.label_font))
-    write_screenshot(ffmpeg=ffmpeg, source=file, dest=dest, instant=instant, vf=vf, replace=replace)
+        text = render(
+            profile.label_template,
+            video_name=file.stem, ext=ext, part=part.index, parts=count,
+            is_final=final, source_path=source_dir,
+        )
+        draw_label(dest, text, profile, font_file(profile.label_font))
 
 
 def _yn(value: str) -> bool:
@@ -231,11 +308,13 @@ def _number(value: str) -> float:
 def answers_to_request(lines: list[str], *, exists, is_dir) -> Request:
     cursor = iter(lines)
     raw_path = next(cursor, "")
+    if not raw_path.strip():
+        raise UsageError("path not found")
     path = Path(raw_path)
     if not exists(path):
         raise UsageError("path not found")
     bulk = bool(is_dir(path))
-    subfolders = _yn(next(cursor)) if bulk else False
+    subfolders: bool | None = _yn(next(cursor)) if bulk else None
     profile_name = next(cursor, "").strip() or None
     override = _yn(next(cursor))
     split_by = split_size = split_minutes = min_length = max_length = split_parts = None
@@ -261,32 +340,8 @@ def answers_to_request(lines: list[str], *, exists, is_dir) -> Request:
 
 def wizard(lines: list[str] | None = None) -> int:
     if lines is None:
-        print("Path: ", end="", file=sys.stderr)
-        entered = sys.stdin.readline().rstrip("\n")
-        path = Path(entered)
-        seq = [entered]
-        if path.is_dir():
-            print("Include subfolders? [y/n]: ", end="", file=sys.stderr)
-            seq.append(sys.stdin.readline().rstrip("\n"))
-        for prompt in ("Profile name (empty for default): ", "Override split mode? [y/n]: "):
-            print(prompt, end="", file=sys.stderr)
-            seq.append(sys.stdin.readline().rstrip("\n"))
-        if seq[-1].strip().lower() == "y":
-            print("Split by [size/fixed/flexible/parts]: ", end="", file=sys.stderr)
-            mode = sys.stdin.readline().rstrip("\n")
-            seq.append(mode)
-            prompts = {
-                "size": ("MB: ",),
-                "fixed": ("Minutes: ",),
-                "flexible": ("Minimum minutes: ", "Maximum minutes: "),
-                "parts": ("Parts: ",),
-            }.get(mode.strip(), ())
-            for prompt in prompts:
-                print(prompt, end="", file=sys.stderr)
-                seq.append(sys.stdin.readline().rstrip("\n"))
-        print("Output directory (empty for settings): ", end="", file=sys.stderr)
-        seq.append(sys.stdin.readline().rstrip("\n"))
-        lines = seq
+        from videosplitter.tui.app import run_tui
+        return run_tui()
     try:
         request = answers_to_request(lines, exists=Path.exists, is_dir=Path.is_dir)
     except AnswerError as exc:
@@ -302,7 +357,7 @@ def command(
     file: Annotated[str | None, Parameter(name=["--file", "-f"])] = None,
     *,
     bulk: Annotated[bool, Parameter(name="--bulk")] = False,
-    subfolders: Annotated[bool, Parameter(name=["--subfolders", "-sf"])] = False,
+    subfolders: Annotated[bool | None, Parameter(name=["--subfolders", "-sf"])] = None,
     output: Annotated[str | None, Parameter(name=["--output", "-o"])] = None,
     profile: Annotated[str | None, Parameter(name=["--profile", "-p"])] = None,
     split_by: Annotated[str | None, Parameter(name="--split-by")] = None,

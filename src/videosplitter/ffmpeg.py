@@ -31,7 +31,10 @@ def ffprobe_bin(ffmpeg: str) -> str:
 
 
 def popen(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, capture_output=True, text=True)
+    # Do not inherit the text UI's streams: their fileno() is -1.
+    return subprocess.run(
+        cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+    )
 
 
 def _seconds(value: float) -> str:
@@ -133,6 +136,34 @@ def validate_screenshot_time(spec: str) -> None:
     screenshot_instant(spec, part_start=0, part_end=1, video_end=1, random_at=0)
 
 
+def _fc_match(name: str) -> str | None:
+    try:
+        out = subprocess.check_output(
+            ["fc-match", "-f", "%{family}\n%{file}", name],
+            text=True, stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    family, _, file = out.strip().partition("\n")
+    if name.casefold() not in family.casefold():
+        return None
+    path = Path(file.strip())
+    return str(path) if path.is_file() else None
+
+
+def system_fonts() -> tuple[str, ...]:
+    try:
+        out = subprocess.check_output(
+            ["fc-list", "-f", "%{family}\n"],
+            text=True, stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return ()
+    names = {line.split(",", 1)[0].strip() for line in out.splitlines()}
+    names.discard("")
+    return tuple(sorted(names, key=str.casefold))
+
+
 def font_file(label_font: str) -> str:
     candidate = Path(label_font)
     if candidate.is_file():
@@ -141,55 +172,50 @@ def font_file(label_font: str) -> str:
         for path in _TIMES:
             if path.is_file():
                 return str(path)
+    found = _fc_match(label_font)
+    if found is not None:
+        return found
     raise FfmpegError("font not found")
 
 
-def _escape(text: str) -> str:
-    return text.replace("\\", "\\\\").replace(":", "\\:").replace("%", "\\%").replace("'", "'\\''")
+def draw_label(dest: Path, text: str, profile: Profile, fontfile: str) -> None:
+    from PIL import Image, ImageDraw, ImageFont
+
+    pos = dict(profile.label_position)
+    vertical = "bottom" if "bottom" in pos else "top"
+    horizontal = "right" if "right" in pos else "left"
+    anchor = {("top", "left"): "lt", ("top", "right"): "rt", ("bottom", "left"): "lb", ("bottom", "right"): "rb"}[(vertical, horizontal)]
+    with Image.open(dest) as img:
+        x = pos.get("left", 0) if horizontal == "left" else img.width - pos.get("right", 0)
+        y = pos.get("top", 0) if vertical == "top" else img.height - pos.get("bottom", 0)
+        draw = ImageDraw.Draw(img)
+        font = ImageFont.truetype(fontfile, profile.label_size_px)
+        draw.text(
+            (x, y), text, font=font, fill=profile.label_color, anchor=anchor,
+            stroke_width=profile.label_border_px, stroke_fill=profile.label_border_color,
+        )
+        img.save(dest)
 
 
-def drawtext(text: str, profile: Profile, fontfile: str) -> str:
-    x = y = None
-    for key, px in profile.label_position:
-        if key == "left":
-            x = str(px)
-        elif key == "right":
-            x = f"w-tw-{px}"
-        elif key == "top":
-            y = str(px)
-        elif key == "bottom":
-            y = f"h-th-{px}"
-    bits = [
-        f"text='{_escape(text)}'",
-        f"fontfile='{_escape(fontfile)}'",
-        f"fontsize={profile.label_size_px}",
-        f"fontcolor={profile.label_color}",
-        f"borderw={profile.label_border_px}",
-        f"bordercolor={profile.label_border_color}",
-    ]
-    if x is not None:
-        bits.append(f"x={x}")
-    if y is not None:
-        bits.append(f"y={y}")
-    return "drawtext=" + ":".join(bits)
+# Square pixels at the size a player shows. Raw 1920x1080 with a tall ratio stays wide otherwise.
+_DISPLAY_SCALE = "scale=iw*sar:ih,setsar=1"
 
 
 def screenshot_command(*, ffmpeg: str, source: Path, dest: Path, instant: float, vf: str | None) -> list[str]:
-    cmd = [
+    graph = _DISPLAY_SCALE if vf is None else f"{_DISPLAY_SCALE},{vf}"
+    return [
         ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
         "-ss", _seconds(instant), "-i", str(source), "-frames:v", "1",
+        "-vf", graph, str(dest),
     ]
-    if vf is not None:
-        cmd.extend(["-vf", vf])
-    cmd.append(str(dest))
-    return cmd
 
 
 def write_screenshot(*, ffmpeg: str, source: Path, dest: Path, instant: float, vf: str | None, replace: bool) -> None:
     if dest.exists() and not replace:
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(dest.name + ".tmp")
+    # Keep the image suffix: ffmpeg refuses *.jpg.tmp.
+    tmp = dest.with_name(f".{dest.stem}.part{dest.suffix}")
     result = popen(screenshot_command(ffmpeg=ffmpeg, source=source, dest=tmp, instant=instant, vf=vf))
     if result.returncode != 0 or not tmp.is_file():
         tmp.unlink(missing_ok=True)

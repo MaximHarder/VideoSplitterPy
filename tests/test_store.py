@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from videosplitter.store import ConfigError, config_dir, ensure, load_profile, load_settings
+from videosplitter.store import ConfigError, config_dir, ensure, load_profile, load_settings, profile_slug
 
 
 def test_config_dirs(tmp_path: Path):
@@ -20,21 +20,34 @@ def test_round_trip(tmp_path: Path):
     assert settings.ffmpeg == "ffmpeg"
     assert settings.extensions == ("mp4", "avi", "flv", "wmv", "mkv")
     assert settings.remove_source is False
-    assert settings.temp_dir == ""
-    assert settings.replace_existing is False
-    assert settings.output_dir == "{source_dir}"
+    assert settings.temp_dir == "{source_path}/.temp"
+    assert settings.replace_existing is True
+    assert settings.output_dir == "{source_path}"
+    assert settings.recursive_search is True
     assert settings.default_profile == "default"
     profile = load_profile(root, "default")
     assert profile.mode == "size"
     assert profile.size_mb == 1800
-    assert profile.min_part_minutes == 1
+    assert profile.min_part_minutes == 8
+    assert profile.minutes == 10
+    assert profile.flex_min == 8
+    assert profile.parts == 5
     assert profile.create_screenshot is False
-    assert profile.screenshot_time == "50% of the part"
+    assert profile.screenshot_time == "random frame of the part"
     assert profile.screenshot_format == "jpg"
-    assert profile.label_position == (("bottom", 15), ("right", 5))
+    assert profile.label_position == (("bottom", 15), ("right", 10))
     text = (root / "profiles" / "default.yml").read_text(encoding="utf-8")
     (root / "profiles" / "default.yml").write_text(text, encoding="utf-8")
     assert load_profile(root, "default") == profile
+
+
+def test_soft_merge_missing_keys(tmp_path: Path):
+    root = ensure(tmp_path / "cfg")
+    (root / "settings.yml").write_text("ffmpeg: custom\nextensions: [mp4]\nremove_source: false\n", encoding="utf-8")
+    settings = load_settings(root)
+    assert settings.ffmpeg == "custom"
+    assert settings.recursive_search is True
+    assert settings.replace_existing is True
 
 
 def test_first_position_key_wins(tmp_path: Path):
@@ -42,7 +55,7 @@ def test_first_position_key_wins(tmp_path: Path):
     path = root / "profiles" / "both.yml"
     path.write_text(
         (root / "profiles" / "default.yml").read_text(encoding="utf-8").replace(
-            "bottom: 15\n  right: 5",
+            "bottom: 15\n  right: 10",
             "top: 1\n  bottom: 9\n  left: 2\n  right: 8",
         ),
         encoding="utf-8",
@@ -66,7 +79,12 @@ def test_profile_numbers_and_flexible_order(tmp_path: Path):
     path.write_text(original.replace("size_mb: 1800", "size_mb: 0"), encoding="utf-8")
     with pytest.raises(ConfigError, match="profile cannot be parsed"):
         load_profile(root, "default")
-    path.write_text(original.replace("mode: size", "mode: flexible").replace("flex_min: 5", "flex_min: 12"), encoding="utf-8")
+    path.write_text(
+        original.replace("mode: size", "mode: flexible")
+        .replace("flex_min: 8", "flex_min: 12")
+        .replace("flex_max: 15", "flex_max: 10"),
+        encoding="utf-8",
+    )
     with pytest.raises(ConfigError, match="flexible minimum is greater than maximum"):
         load_profile(root, "default")
 
@@ -77,9 +95,13 @@ def test_missing_profile(tmp_path: Path):
         load_profile(root, "missing")
 
 
-def test_present_settings_do_not_recreate_a_deleted_profile(tmp_path: Path):
+def test_ensure_recreates_missing_default_profile(tmp_path: Path):
     root = ensure(tmp_path / "cfg")
     default = root / "profiles" / "default.yml"
     default.unlink()
     ensure(root)
-    assert not default.exists()
+    assert default.exists()
+
+
+def test_profile_slug():
+    assert profile_slug("My Profile") == "my-profile"

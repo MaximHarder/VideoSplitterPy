@@ -1,4 +1,4 @@
-"""Name templates. translited is Russian Cyrillic to Latin; other characters stay."""
+"""Name templates. translited maps Cyrillic to Latin; optional space replacement."""
 
 from __future__ import annotations
 
@@ -12,14 +12,17 @@ _RU = {
     "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
 }
 _TAG = re.compile(r"\{([^{}]+)\}")
-_BLOCK = re.compile(r"\[is_final\](.*?)\[/is_final\]", re.DOTALL)
+_BLOCK = re.compile(
+    r"\[(is_last|is_first)\](.*?)(?:\[else\](.*?))?\[/\1\]",
+    re.DOTALL,
+)
 
 
 class NameError(Exception):
     pass
 
 
-def translited(text: str) -> str:
+def translited(text: str, space: str | bool = "-") -> str:
     out = []
     for ch in text:
         rep = _RU.get(ch.lower())
@@ -29,7 +32,11 @@ def translited(text: str) -> str:
             out.append(rep[0].upper() + rep[1:])
         else:
             out.append(rep)
-    return "".join(out)
+    result = "".join(out)
+    if space is False:
+        return result
+    sep = "-" if space is True or space == "" else str(space)
+    return re.sub(r"\s+", sep, result)
 
 
 def _fn(spec: str, value: object) -> object:
@@ -37,8 +44,16 @@ def _fn(spec: str, value: object) -> object:
         return str(value).upper()
     if spec == "lowercase":
         return str(value).lower()
+    if spec == "capitalize":
+        return str(value).title()
     if spec == "translited":
-        return translited(str(value))
+        return translited(str(value), space="-")
+    tr = re.fullmatch(r"translited\((.*)\)", spec)
+    if tr:
+        raw = tr.group(1).strip()
+        if raw.lower() == "false":
+            return translited(str(value), space=False)
+        return translited(str(value), space=raw.strip("'\""))
     if spec == "int":
         return int(float(value))
     pad = re.fullmatch(r"pad\((\d+)\)", spec)
@@ -64,9 +79,25 @@ def _tag(body: str, values: dict[str, object]) -> str:
     return str(value)
 
 
-def render(template: str, *, video_name: str, ext: str, part: int, parts: int, is_final: bool) -> str:
+def render(
+    template: str,
+    *,
+    video_name: str,
+    ext: str,
+    part: int,
+    parts: int,
+    is_final: bool,
+    source_path: str = "",
+    is_first: bool | None = None,
+) -> str:
+    first = part == 1 if is_first is None else is_first
+
     def block(match: re.Match[str]) -> str:
-        return match.group(1) if is_final else ""
+        kind, when_true, when_false = match.group(1), match.group(2), match.group(3)
+        active = is_final if kind == "is_last" else first
+        if active:
+            return when_true
+        return when_false if when_false is not None else ""
 
     text = _BLOCK.sub(block, template)
     values = {
@@ -75,10 +106,11 @@ def render(template: str, *, video_name: str, ext: str, part: int, parts: int, i
         "ext": ext,
         "part": part,
         "parts": parts,
+        "source_path": source_path,
     }
     return _TAG.sub(lambda match: _tag(match.group(1), values), text)
 
 
 def validate_template(template: str) -> None:
-    render(template, video_name="x", ext="mp4", part=1, parts=2, is_final=False)
-    render(template, video_name="x", ext="mp4", part=2, parts=2, is_final=True)
+    render(template, video_name="x", ext="mp4", part=1, parts=2, is_final=False, source_path="/tmp")
+    render(template, video_name="x", ext="mp4", part=2, parts=2, is_final=True, source_path="/tmp")

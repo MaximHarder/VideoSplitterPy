@@ -12,14 +12,26 @@ def _ready(tmp_path: Path, *, remove: bool, replace: bool, shot: bool = False):
     settings = (root / "settings.yml").read_text(encoding="utf-8")
     settings = settings.replace("ffmpeg: ffmpeg", f'ffmpeg: "{ffmpeg.as_posix()}"')
     settings = settings.replace("remove_source: false", f"remove_source: {str(remove).lower()}")
-    settings = settings.replace("replace_existing: false", f"replace_existing: {str(replace).lower()}")
-    settings = settings.replace('output_dir: "{source_dir}"', f'output_dir: "{(tmp_path / "out").as_posix()}"')
+    settings = settings.replace("replace_existing: true", f"replace_existing: {str(replace).lower()}")
+    settings = settings.replace('output_dir: "{source_path}"', f'output_dir: "{(tmp_path / "out").as_posix()}"')
     (root / "settings.yml").write_text(settings, encoding="utf-8")
     profile = (root / "profiles" / "default.yml").read_text(encoding="utf-8")
-    profile = profile.replace("mode: size", "mode: parts").replace("parts: 2", "parts: 2")
-    profile = profile.replace("min_part_minutes: 1", "min_part_minutes: 0.01")
+    profile = profile.replace("mode: size", "mode: parts").replace("parts: 5", "parts: 2")
+    profile = profile.replace("min_part_minutes: 8", "min_part_minutes: 0.01")
+    profile = profile.replace(
+        'name_template: "{video_name|translited}_{part}.{ext}"',
+        'name_template: "{video_name}_p{part|pad(2)}.{ext}"',
+    )
+    profile = profile.replace(
+        'screenshot_name: "{video_name|translited}_{part}"',
+        'screenshot_name: "{video_name}_p{part|pad(2)}"',
+    )
     if shot:
         profile = profile.replace("create_screenshot: false", "create_screenshot: true")
+        profile = profile.replace(
+            'screenshot_time: "random frame of the part"',
+            'screenshot_time: "50% of the part"',
+        )
     (root / "profiles" / "default.yml").write_text(profile, encoding="utf-8")
     os.environ["VIDEOSPLITTER_STUB_LOG"] = str(tmp_path / "log")
     os.environ["VIDEOSPLITTER_STUB_DURATION"] = "10"
@@ -30,6 +42,23 @@ def _ready(tmp_path: Path, *, remove: bool, replace: bool, shot: bool = False):
     return root, source
 
 
+def test_progress_reports_file_and_part(tmp_path: Path):
+    root, source = _ready(tmp_path, remove=False, replace=True)
+    lines: list[str] = []
+    code = execute(
+        Request(source, False, False, None, None, None, None, None, None, None, None),
+        config=root,
+        on_progress=lines.append,
+    )
+    assert code == 0
+    text = "\n".join(lines)
+    assert "files:" in text and "1/1" in text
+    assert "parts:" in text and "2/2" in text
+    assert f"wrote {source}" in text
+    from tqdm.std import TqdmDefaultWriteLock
+    assert TqdmDefaultWriteLock.mp_lock is None
+
+
 def test_writes_parts_and_can_remove_source(tmp_path: Path, capsys):
     root, source = _ready(tmp_path, remove=True, replace=False)
     code = execute(Request(source, False, False, None, None, None, None, None, None, None, None), config=root)
@@ -37,7 +66,9 @@ def test_writes_parts_and_can_remove_source(tmp_path: Path, capsys):
     assert (tmp_path / "out" / "Holiday_p01.mp4").is_file()
     assert (tmp_path / "out" / "Holiday_p02.mp4").is_file()
     assert not source.exists()
-    assert capsys.readouterr().out.strip() == f"wrote {source}"
+    captured = capsys.readouterr()
+    assert "files:" in captured.err and "parts:" in captured.err
+    assert captured.out.strip().endswith(f"wrote {source}")
 
 
 def test_replace_off_keeps_existing_and_source(tmp_path: Path):
@@ -70,6 +101,8 @@ def test_screenshot_png_name(tmp_path: Path):
     log = (tmp_path / "log").read_text(encoding="utf-8")
     assert "7.500000" in log
     assert "drawtext" not in log
+    frames = [line for line in log.splitlines() if "-frames:v" in line]
+    assert frames and frames[-1].endswith(".png")
 
 
 def test_screenshot_failure_keeps_part_and_source(tmp_path: Path, capsys):

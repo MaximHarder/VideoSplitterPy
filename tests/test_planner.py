@@ -1,3 +1,5 @@
+import random
+
 import pytest
 
 from videosplitter.planner import PlanError, Profile, plan
@@ -12,17 +14,17 @@ def profile(**kwargs):
         flex_max=10,
         parts=2,
         min_part_minutes=1,
-        name_template="{video_name}_p{part|pad(2)}.{ext}",
+        name_template="{video_name}_{part}.{ext}",
         create_screenshot=False,
-        screenshot_time="50% of the part",
-        screenshot_name="{video_name}_p{part|pad(2)}",
+        screenshot_time="random frame of the part",
+        screenshot_name="{video_name}_{part}",
         screenshot_format="jpg",
         write_label=False,
-        label_template="{part},[is_final][/is_final],{file_name}",
+        label_template="[is_last]Final[else]PART {part}[/is_last]",
         label_font="Times New Roman",
         label_size_px=13,
         label_color="white",
-        label_position=(("bottom", 15), ("right", 5)),
+        label_position=(("bottom", 15), ("right", 10)),
         label_border_px=2,
         label_border_color="black",
     )
@@ -60,16 +62,33 @@ def test_fixed_fits_one_slice():
     assert plan(profile(mode="fixed", minutes=30), 30 * 60, 1) == []
 
 
-def test_flexible_equal():
-    parts = plan(profile(mode="flexible", flex_min=5, flex_max=10), 23 * 60, 1)
-    assert len(parts) == 3
-    assert parts[0].end - parts[0].start == pytest.approx(23 * 60 / 3)
-    assert parts[2].end == pytest.approx(23 * 60)
+def test_flexible_random_seeded():
+    parts = plan(
+        profile(mode="flexible", flex_min=5, flex_max=10),
+        23 * 60,
+        1,
+        rng=random.Random(1),
+    )
+    assert len(parts) >= 2
+    assert parts[0].start == 0
+    assert parts[-1].end == pytest.approx(23 * 60)
+    for part in parts:
+        length = part.end - part.start
+        assert length == pytest.approx(length)
+        assert length <= 10 * 60 + 1e-6
+        assert length >= 5 * 60 - 1e-6 or part is parts[-1]
+
+
+def test_flexible_seed_stable(monkeypatch):
+    monkeypatch.setenv("VIDEOSPLITTER_FLEX_SEED", "42")
+    left = plan(profile(mode="flexible", flex_min=5, flex_max=10), 23 * 60, 1)
+    right = plan(profile(mode="flexible", flex_min=5, flex_max=10), 23 * 60, 1)
+    assert [(p.start, p.end) for p in left] == [(p.start, p.end) for p in right]
 
 
 def test_flexible_impossible():
     with pytest.raises(PlanError, match="flexible bounds"):
-        plan(profile(mode="flexible", flex_min=8, flex_max=10), 11 * 60, 1)
+        plan(profile(mode="flexible", flex_min=8, flex_max=10), 11 * 60, 1, rng=random.Random(0))
 
 
 def test_flexible_under_max_is_not_split():

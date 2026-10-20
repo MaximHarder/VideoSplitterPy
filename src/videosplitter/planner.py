@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import os
+import random
 from dataclasses import dataclass
 
 
@@ -50,7 +52,52 @@ def _equal(duration: float, count: int) -> list[Part]:
     return parts
 
 
-def plan(profile: Profile, duration_s: float, size_bytes: int) -> list[Part]:
+def _flex_rng(rng: random.Random | None) -> random.Random:
+    if rng is not None:
+        return rng
+    seed = os.environ.get("VIDEOSPLITTER_FLEX_SEED")
+    if seed is not None and seed != "":
+        return random.Random(int(seed))
+    return random.Random()
+
+
+def _flexible_random(duration_s: float, min_s: float, max_s: float, rng: random.Random) -> list[Part]:
+    if duration_s <= max_s:
+        return []
+    parts: list[Part] = []
+    start = 0.0
+    index = 1
+    for _ in range(10_000):
+        remaining = duration_s - start
+        if remaining <= 0:
+            break
+        if remaining <= max_s and remaining >= min_s:
+            parts.append(Part(index, start, duration_s))
+            return parts
+        if remaining < min_s:
+            raise PlanError("flexible bounds")
+        room_for_next = remaining - min_s
+        upper = min(max_s, room_for_next)
+        if upper < min_s:
+            if remaining > max_s:
+                raise PlanError("flexible bounds")
+            parts.append(Part(index, start, duration_s))
+            return parts
+        length = rng.uniform(min_s, upper)
+        end = start + length
+        parts.append(Part(index, start, end))
+        start = end
+        index += 1
+    raise PlanError("flexible bounds")
+
+
+def plan(
+    profile: Profile,
+    duration_s: float,
+    size_bytes: int,
+    *,
+    rng: random.Random | None = None,
+) -> list[Part]:
     if duration_s < profile.min_part_minutes * 60:
         return []
     if profile.mode == "size":
@@ -73,13 +120,9 @@ def plan(profile: Profile, duration_s: float, size_bytes: int) -> list[Part]:
             index += 1
         return parts
     if profile.mode == "flexible":
+        min_s = profile.flex_min * 60
         max_s = profile.flex_max * 60
-        if duration_s <= max_s:
-            return []
-        count = math.ceil(duration_s / max_s)
-        if duration_s / count < profile.flex_min * 60:
-            raise PlanError("flexible bounds")
-        return _equal(duration_s, count)
+        return _flexible_random(duration_s, min_s, max_s, _flex_rng(rng))
     if profile.parts < 2:
         return []
     return _equal(duration_s, profile.parts)
