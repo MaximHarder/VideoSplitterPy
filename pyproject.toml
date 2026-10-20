@@ -1,6 +1,6 @@
 [project]
 name = "videosplitter"
-version = "0.1.0"
+version = "0.1.1b1"
 description = "Split videos into parts with FFmpeg, without re-encoding"
 readme = "README.md"
 license = "MIT"
