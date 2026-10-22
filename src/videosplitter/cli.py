@@ -131,23 +131,6 @@ def _output_dir(file: Path, request: Request, output_dir: str, *, use_subfolders
     return base
 
 
-class _BarSink:
-    """tqdm writes \\r updates. Forward each finished line to the TUI."""
-
-    def __init__(self, emit: Callable[[str], None]) -> None:
-        self.emit = emit
-
-    def write(self, text: str) -> int:
-        for piece in text.replace("\r", "\n").split("\n"):
-            line = piece.strip()
-            if line:
-                self.emit(line)
-        return len(text)
-
-    def flush(self) -> None:
-        return None
-
-
 def _progress(on_progress: Callable[[str], None] | None, line: str, *, err: bool = False) -> None:
     if on_progress is not None:
         on_progress(line)
@@ -191,11 +174,20 @@ def execute(
         print("no videos")
         return 0
     failed = False
-    bar_file = sys.stderr if on_progress is None else _BarSink(on_progress)
-    with tqdm(total=len(files), desc="files", file=bar_file, leave=True, mininterval=0, ascii=True, ncols=80) as files_bar:
+    total_files = len(files)
+    # TUI callback path: no tqdm (its locks stall the worker under Textual).
+    if on_progress is not None:
+        for index, file in enumerate(files, start=1):
+            _progress(on_progress, f"files: {index - 1}/{total_files} {file.name}")
+            if not _one(file, request, settings, profile, random_at, use_sub, on_progress):
+                failed = True
+            _progress(on_progress, f"files: {index}/{total_files} {file.name}")
+        return 1 if failed else 0
+
+    with tqdm(total=total_files, desc="files", file=sys.stderr, leave=True, mininterval=0, ascii=True, ncols=80) as files_bar:
         for file in files:
             files_bar.set_postfix_str(file.name, refresh=False)
-            if not _one(file, request, settings, profile, random_at, use_sub, on_progress, bar_file):
+            if not _one(file, request, settings, profile, random_at, use_sub, on_progress):
                 failed = True
             files_bar.update(1)
     return 1 if failed else 0
@@ -209,7 +201,6 @@ def _one(
     random_at: float | None,
     use_sub: bool,
     on_progress: Callable[[str], None] | None,
-    bar_file,
 ) -> bool:
     try:
         duration = probe_duration(ffprobe_bin(settings.ffmpeg), file)
@@ -237,16 +228,24 @@ def _one(
     except OSError:
         _progress(on_progress, f"fail {file}: cannot create temp", err=True)
         return False
-    with tqdm(total=len(parts), desc="parts", file=bar_file, leave=False, mininterval=0, ascii=True, ncols=80) as part_bar:
-        for part in parts:
-            part_bar.set_postfix_str(file.name, refresh=False)
-            part_bar.update(1)
-            final = part.index == len(parts)
+    total_parts = len(parts)
+    if on_progress is not None:
+        _progress(on_progress, f"parts: 0/{total_parts} {file.name}")
+    part_bar = (
+        None
+        if on_progress is not None
+        else tqdm(total=total_parts, desc="parts", file=sys.stderr, leave=False, mininterval=0, ascii=True, ncols=80)
+    )
+    try:
+        for done, part in enumerate(parts, start=1):
+            if part_bar is not None:
+                part_bar.set_postfix_str(file.name, refresh=False)
+            final = part.index == total_parts
             ext = file.suffix.lstrip(".")
             try:
                 part_name = render(
                     profile.name_template,
-                    video_name=file.stem, ext=ext, part=part.index, parts=len(parts),
+                    video_name=file.stem, ext=ext, part=part.index, parts=total_parts,
                     is_final=final, source_path=source_dir,
                 )
                 status = write_part(
@@ -256,10 +255,17 @@ def _one(
                 if status == "wrote":
                     wrote_new = True
                 if profile.create_screenshot:
-                    _shot(file, out, profile, part, len(parts), duration, settings.ffmpeg, random_at, settings.replace_existing, source_dir)
+                    _shot(file, out, profile, part, total_parts, duration, settings.ffmpeg, random_at, settings.replace_existing, source_dir)
             except (FfmpegError, NameError) as exc:
                 _progress(on_progress, f"fail {file}: {exc}", err=True)
                 return False
+            if on_progress is not None:
+                _progress(on_progress, f"parts: {done}/{total_parts} {file.name}")
+            elif part_bar is not None:
+                part_bar.update(1)
+    finally:
+        if part_bar is not None:
+            part_bar.close()
     if wrote_new and settings.remove_source:
         file.unlink()
     _progress(on_progress, f"wrote {file}")

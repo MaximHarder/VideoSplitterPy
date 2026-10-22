@@ -55,8 +55,7 @@ def test_progress_reports_file_and_part(tmp_path: Path):
     assert "files:" in text and "1/1" in text
     assert "parts:" in text and "2/2" in text
     assert f"wrote {source}" in text
-    from tqdm.std import TqdmDefaultWriteLock
-    assert TqdmDefaultWriteLock.mp_lock is None
+    assert any(line.startswith("parts: 2/2") for line in lines)
 
 
 def test_writes_parts_and_can_remove_source(tmp_path: Path, capsys):

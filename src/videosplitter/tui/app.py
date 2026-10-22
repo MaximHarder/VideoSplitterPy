@@ -8,6 +8,7 @@ from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.message import Message
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Label, OptionList, Select, Static
 from textual.widgets.option_list import Option
@@ -61,6 +62,7 @@ class MainMenu(Screen):
 
 _BOOL = (("true", "true"), ("false", "false"))
 _MODES = ("size", "fixed", "flexible", "parts")
+_BG_SHAPES = ("rect", "parallelogram")
 _SHOT_FMT = ("jpg", "png", "webp")
 _SHOT_TIMES = (
     "random frame of the part",
@@ -294,12 +296,12 @@ class ProfileEditScreen(Screen):
                 Input(str(p.label_size_px), id="label_size_px"),
                 Label("Label color"),
                 Input(p.label_color, id="label_color"),
-                Label("Label position vertical (top/bottom:N)"),
+                Label("Label position vertical (top/bottom:N or N%)"),
                 Input(
                     next((f"{k}:{v}" for k, v in p.label_position if k in {"top", "bottom"}), "bottom:15"),
                     id="pos_v",
                 ),
-                Label("Label position horizontal (left/right:N)"),
+                Label("Label position horizontal (left/right:N or N%)"),
                 Input(
                     next((f"{k}:{v}" for k, v in p.label_position if k in {"left", "right"}), "right:10"),
                     id="pos_h",
@@ -308,6 +310,22 @@ class ProfileEditScreen(Screen):
                 Input(str(p.label_border_px), id="label_border_px"),
                 Label("Label border color"),
                 Input(p.label_border_color, id="label_border_color"),
+                Label("Label background"),
+                _bool_select(p.label_bg, "label_bg"),
+                Label("Label background shape"),
+                _choice_select(_BG_SHAPES, p.label_bg_shape, "label_bg_shape"),
+                Label("Label background color"),
+                Input(p.label_bg_color, id="label_bg_color"),
+                Label("Label background padding X (px or %)"),
+                Input(p.label_bg_padding_x, id="label_bg_padding_x"),
+                Label("Label background padding Y (px or %)"),
+                Input(p.label_bg_padding_y, id="label_bg_padding_y"),
+                Label("Label background skew (px)"),
+                Input(str(p.label_bg_skew_px), id="label_bg_skew_px"),
+                Label("Label background border (px)"),
+                Input(str(p.label_bg_border_px), id="label_bg_border_px"),
+                Label("Label background border color"),
+                Input(p.label_bg_border_color, id="label_bg_border_color"),
                 id="profile-form",
             )
             yield Horizontal(
@@ -318,15 +336,24 @@ class ProfileEditScreen(Screen):
             yield Static("", id="msg")
         yield Footer()
 
-    def _parse_side(self, raw: str, allowed: set[str]) -> tuple[str, int]:
+    def _parse_side(self, raw: str, allowed: set[str]) -> tuple[str, str]:
         text = raw.strip()
         if ":" not in text:
-            raise ValueError(f"use side:px, got {raw!r}")
+            raise ValueError(f"use side:N or side:N%, got {raw!r}")
         side, _, num = text.partition(":")
         side = side.strip().lower()
         if side not in allowed:
             raise ValueError(f"side must be one of {sorted(allowed)}")
-        return side, int(num.strip())
+        token = num.strip()
+        if token.endswith("%"):
+            pct = float(token[:-1].strip())
+            if pct < 0 or pct > 100:
+                raise ValueError("percent must be 0–100")
+            return side, f"{pct:g}%"
+        value = float(token)
+        if value < 0 or value != int(value):
+            raise ValueError("use integer px or N%")
+        return side, str(int(value))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "back":
@@ -359,6 +386,14 @@ class ProfileEditScreen(Screen):
                 label_position=(pos_v, pos_h),
                 label_border_px=int(float(self.query_one("#label_border_px", Input).value)),
                 label_border_color=self.query_one("#label_border_color", Input).value.strip(),
+                label_bg=_bool_value(self, "label_bg"),
+                label_bg_shape=_choice_value(self, "label_bg_shape"),
+                label_bg_color=self.query_one("#label_bg_color", Input).value.strip(),
+                label_bg_padding_x=self.query_one("#label_bg_padding_x", Input).value.strip(),
+                label_bg_padding_y=self.query_one("#label_bg_padding_y", Input).value.strip(),
+                label_bg_skew_px=int(float(self.query_one("#label_bg_skew_px", Input).value)),
+                label_bg_border_px=int(float(self.query_one("#label_bg_border_px", Input).value)),
+                label_bg_border_color=self.query_one("#label_bg_border_color", Input).value.strip(),
             )
             save_profile(_root(), self.profile_name, profile)
             msg.update("Saved.")
@@ -367,6 +402,18 @@ class ProfileEditScreen(Screen):
 
 
 class StartScreen(Screen):
+    class ProgressText(Message):
+        """Worker → UI progress (non-blocking; call_from_thread waits and can stall ffmpeg)."""
+
+        def __init__(self, text: str) -> None:
+            super().__init__()
+            self.text = text
+
+    class RunDone(Message):
+        def __init__(self, text: str) -> None:
+            super().__init__()
+            self.text = text
+
     def __init__(self) -> None:
         super().__init__()
         self._busy = False
@@ -379,6 +426,12 @@ class StartScreen(Screen):
     def _finish(self, text: str) -> None:
         self._set_busy(False)
         self.query_one("#msg", Static).update(text)
+
+    def on_start_screen_progress_text(self, event: ProgressText) -> None:
+        self.query_one("#summary", Static).update(event.text)
+
+    def on_start_screen_run_done(self, event: RunDone) -> None:
+        self._finish(event.text)
 
     def compose(self) -> ComposeResult:
         root = _root()
@@ -472,7 +525,7 @@ class StartScreen(Screen):
                 else:
                     state["log"].append(line)
                 text = "\n".join(item for item in (state["files"], state["parts"], *state["log"]) if item)
-                self.app.call_from_thread(summary.update, text)
+                self.post_message(self.ProgressText(text))
 
             def work() -> None:
                 try:
@@ -480,7 +533,7 @@ class StartScreen(Screen):
                     text = f"Finished with exit code {code}."
                 except Exception as exc:
                     text = str(exc)
-                self.app.call_from_thread(self._finish, text)
+                self.post_message(self.RunDone(text))
 
             threading.Thread(target=work, daemon=True).start()
 
