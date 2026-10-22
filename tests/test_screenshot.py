@@ -14,8 +14,11 @@ def profile(**kwargs):
         screenshot_name="{video_name}_p{part|pad(2)}", screenshot_format="jpg",
         write_label=True, label_template="[is_last]Final[else]PART {part}[/is_last]",
         label_font="Times New Roman", label_size_px=13, label_color="white",
-        label_position=(("bottom", 15), ("right", 5)), label_border_px=2,
+        label_position=(("bottom", "15"), ("right", "5")), label_border_px=2,
         label_border_color="black",
+        label_bg=False, label_bg_shape="parallelogram", label_bg_color="white",
+        label_bg_padding_x="8", label_bg_padding_y="8", label_bg_skew_px=12,
+        label_bg_border_px=2, label_bg_border_color="black",
     )
     base.update(kwargs)
     return Profile(**base)
@@ -50,7 +53,7 @@ def test_label_and_plain_font(tmp_path: Path):
     from PIL import Image
 
     font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-    sample = profile(label_font=font, label_color="black", label_border_px=0, label_position=(("top", 4), ("left", 4)))
+    sample = profile(label_font=font, label_color="black", label_border_px=0, label_position=(("top", "4"), ("left", "4")))
     dest = tmp_path / "shot.png"
     Image.new("RGB", (200, 80), "white").save(dest)
     before = dest.read_bytes()
@@ -64,3 +67,77 @@ def test_label_and_plain_font(tmp_path: Path):
     assert "DejaVu Sans" in system_fonts()
     with pytest.raises(Exception, match="font not found"):
         font_file(str(tmp_path / "missing.ttf"))
+
+
+def test_label_bg_fill_pixel(tmp_path: Path):
+    from PIL import Image
+
+    font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    dest = tmp_path / "bg.png"
+    Image.new("RGB", (200, 100), "black").save(dest)
+    sample = profile(
+        label_font=font, label_color="black", label_border_px=0,
+        label_position=(("top", "10"), ("left", "10")),
+        label_bg=True, label_bg_shape="rect", label_bg_color="red",
+        label_bg_padding_x="20", label_bg_padding_y="10",
+        label_bg_border_px=0, label_bg_skew_px=0,
+    )
+    draw_label(dest, "X", sample, font)
+    pix = Image.open(dest).load()
+    # Far corner of padding (away from glyph AA) is fill color.
+    assert pix[2, 2] == (255, 0, 0)
+
+
+def test_label_center_on_percent(tmp_path: Path):
+    from PIL import Image
+
+    font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    dest = tmp_path / "mid.png"
+    Image.new("RGB", (200, 100), "white").save(dest)
+    sample = profile(
+        label_font=font, label_color="black", label_border_px=0,
+        label_position=(("top", "50%"), ("left", "50%")),
+        label_bg=True, label_bg_shape="rect", label_bg_color="blue",
+        label_bg_padding_x="4", label_bg_padding_y="4",
+        label_bg_border_px=0, label_bg_skew_px=0,
+    )
+    draw_label(dest, "MID", sample, font)
+    img = Image.open(dest)
+    # Find blue bbox; its center should be near frame center.
+    xs, ys = [], []
+    pix = img.load()
+    for y in range(img.height):
+        for x in range(img.width):
+            if pix[x, y] == (0, 0, 255):
+                xs.append(x)
+                ys.append(y)
+    assert xs and ys
+    cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+    assert abs(cx - 100) <= 3
+    assert abs(cy - 50) <= 3
+
+
+def test_label_padding_percent_scales(tmp_path: Path):
+    from PIL import Image
+
+    font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    dest = tmp_path / "pad.png"
+    Image.new("RGB", (200, 100), "black").save(dest)
+    sample = profile(
+        label_font=font, label_color="white", label_border_px=0,
+        label_position=(("top", "50%"), ("left", "50%")),
+        label_bg=True, label_bg_shape="rect", label_bg_color="green",
+        label_bg_padding_x="10%", label_bg_padding_y="10%",
+        label_bg_border_px=0, label_bg_skew_px=0,
+    )
+    draw_label(dest, "P", sample, font)
+    img = Image.open(dest)
+    pix = img.load()
+    greens = [
+        (x, y) for y in range(img.height) for x in range(img.width)
+        if pix[x, y][1] >= 100 and pix[x, y][0] < 40 and pix[x, y][2] < 40
+    ]
+    assert greens
+    width = max(x for x, _ in greens) - min(x for x, _ in greens) + 1
+    # 10% of 200 = 20px pad each side → bg at least ~40px wider than bare glyph
+    assert width >= 40

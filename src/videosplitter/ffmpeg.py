@@ -178,21 +178,71 @@ def font_file(label_font: str) -> str:
     raise FfmpegError("font not found")
 
 
+def _resolve_length(token: str, axis: int) -> float:
+    text = str(token).strip()
+    if text.endswith("%"):
+        return axis * float(text[:-1].strip()) / 100.0
+    return float(text)
+
+
 def draw_label(dest: Path, text: str, profile: Profile, fontfile: str) -> None:
     from PIL import Image, ImageDraw, ImageFont
 
-    pos = dict(profile.label_position)
+    pos = {side: str(value) for side, value in profile.label_position}
     vertical = "bottom" if "bottom" in pos else "top"
     horizontal = "right" if "right" in pos else "left"
-    anchor = {("top", "left"): "lt", ("top", "right"): "rt", ("bottom", "left"): "lb", ("bottom", "right"): "rb"}[(vertical, horizontal)]
+    use_center = any(v.strip().endswith("%") for v in pos.values())
     with Image.open(dest) as img:
-        x = pos.get("left", 0) if horizontal == "left" else img.width - pos.get("right", 0)
-        y = pos.get("top", 0) if vertical == "top" else img.height - pos.get("bottom", 0)
+        w, h = img.size
         draw = ImageDraw.Draw(img)
         font = ImageFont.truetype(fontfile, profile.label_size_px)
+        stroke = profile.label_border_px
+        # Measure ink box at origin with left-top anchor.
+        tb = draw.textbbox((0, 0), text, font=font, anchor="lt", stroke_width=stroke)
+        tw, th = tb[2] - tb[0], tb[3] - tb[1]
+        pad_x = _resolve_length(profile.label_bg_padding_x, w) if profile.label_bg else 0.0
+        pad_y = _resolve_length(profile.label_bg_padding_y, h) if profile.label_bg else 0.0
+        box_w, box_h = tw + 2 * pad_x, th + 2 * pad_y
+
+        if use_center:
+            tx = _resolve_length(pos["left"], w) if "left" in pos else w - _resolve_length(pos["right"], w)
+            ty = _resolve_length(pos["top"], h) if "top" in pos else h - _resolve_length(pos["bottom"], h)
+            # Sticker (text + padding) center sits on the target point.
+            box_x0, box_y0 = tx - box_w / 2, ty - box_h / 2
+            text_xy = (box_x0 + pad_x, box_y0 + pad_y)
+            anchor = "lt"
+        else:
+            anchor = {
+                ("top", "left"): "lt", ("top", "right"): "rt",
+                ("bottom", "left"): "lb", ("bottom", "right"): "rb",
+            }[(vertical, horizontal)]
+            text_xy = (
+                _resolve_length(pos.get("left", "0"), w) if horizontal == "left" else w - _resolve_length(pos.get("right", "0"), w),
+                _resolve_length(pos.get("top", "0"), h) if vertical == "top" else h - _resolve_length(pos.get("bottom", "0"), h),
+            )
+            ink = draw.textbbox(text_xy, text, font=font, anchor=anchor, stroke_width=stroke)
+            box_x0, box_y0 = ink[0] - pad_x, ink[1] - pad_y
+            box_w, box_h = (ink[2] - ink[0]) + 2 * pad_x, (ink[3] - ink[1]) + 2 * pad_y
+
+        if profile.label_bg:
+            x0, y0 = box_x0, box_y0
+            x1, y1 = box_x0 + box_w, box_y0 + box_h
+            skew = profile.label_bg_skew_px if profile.label_bg_shape == "parallelogram" else 0
+            border = max(0, profile.label_bg_border_px)
+            if skew == 0:
+                draw.rectangle(
+                    [x0, y0, x1, y1],
+                    fill=profile.label_bg_color,
+                    outline=profile.label_bg_border_color,
+                    width=border,
+                )
+            else:
+                pts = [(x0 + skew, y0), (x1 + skew, y0), (x1, y1), (x0, y1)]
+                draw.polygon(pts, fill=profile.label_bg_color, outline=profile.label_bg_border_color, width=border)
+
         draw.text(
-            (x, y), text, font=font, fill=profile.label_color, anchor=anchor,
-            stroke_width=profile.label_border_px, stroke_fill=profile.label_border_color,
+            text_xy, text, font=font, fill=profile.label_color, anchor=anchor,
+            stroke_width=stroke, stroke_fill=profile.label_border_color,
         )
         img.save(dest)
 

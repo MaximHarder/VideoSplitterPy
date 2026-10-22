@@ -34,9 +34,17 @@ class Profile:
     label_font: str
     label_size_px: int
     label_color: str
-    label_position: tuple[tuple[str, int], ...]
+    label_position: tuple[tuple[str, str], ...]
     label_border_px: int
     label_border_color: str
+    label_bg: bool
+    label_bg_shape: str
+    label_bg_color: str
+    label_bg_padding_x: str
+    label_bg_padding_y: str
+    label_bg_skew_px: int
+    label_bg_border_px: int
+    label_bg_border_color: str
 
 
 class PlanError(Exception):

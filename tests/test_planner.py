@@ -24,9 +24,17 @@ def profile(**kwargs):
         label_font="Times New Roman",
         label_size_px=13,
         label_color="white",
-        label_position=(("bottom", 15), ("right", 10)),
+        label_position=(("bottom", "15"), ("right", "10")),
         label_border_px=2,
         label_border_color="black",
+        label_bg=False,
+        label_bg_shape="parallelogram",
+        label_bg_color="white",
+        label_bg_padding_x="8",
+        label_bg_padding_y="8",
+        label_bg_skew_px=12,
+        label_bg_border_px=2,
+        label_bg_border_color="black",
     )
     base.update(kwargs)
     return Profile(**base)

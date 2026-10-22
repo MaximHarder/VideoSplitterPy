@@ -19,6 +19,9 @@ _PROFILE_KEYS = (
     "screenshot_name", "screenshot_format", "write_label", "label_template",
     "label_font", "label_size_px", "label_color", "label_position",
     "label_border_px", "label_border_color",
+    "label_bg", "label_bg_shape", "label_bg_color", "label_bg_padding_x",
+    "label_bg_padding_y", "label_bg_skew_px", "label_bg_border_px",
+    "label_bg_border_color",
 )
 
 DEFAULT_SETTINGS = """\
@@ -60,6 +63,14 @@ label_position:
   right: 10
 label_border_px: 2
 label_border_color: black
+label_bg: false
+label_bg_shape: parallelogram
+label_bg_color: white
+label_bg_padding_x: "8"
+label_bg_padding_y: "8"
+label_bg_skew_px: 12
+label_bg_border_px: 2
+label_bg_border_color: black
 """
 
 _SETTINGS_DEFAULTS = yaml.safe_load(DEFAULT_SETTINGS)
@@ -168,17 +179,46 @@ def save_settings(root: Path, settings: Settings) -> None:
     path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
 
-def _position(raw: object) -> tuple[tuple[str, int], ...]:
+def _length_token(raw: object) -> str:
+    """Bare number = px; trailing % = fraction of frame axis (0–100)."""
+    if isinstance(raw, bool):
+        raise ConfigError("profile cannot be parsed")
+    if isinstance(raw, (int, float)):
+        if isinstance(raw, float) and not raw.is_integer():
+            raise ConfigError("profile cannot be parsed")
+        n = int(raw)
+        if n < 0:
+            raise ConfigError("profile cannot be parsed")
+        return str(n)
+    text = str(raw).strip()
+    if text.endswith("%"):
+        try:
+            pct = float(text[:-1].strip())
+        except ValueError:
+            raise ConfigError("profile cannot be parsed") from None
+        if pct < 0 or pct > 100:
+            raise ConfigError("profile cannot be parsed")
+        return f"{pct:g}%"
+    try:
+        value = float(text)
+    except ValueError:
+        raise ConfigError("profile cannot be parsed") from None
+    if value < 0 or value != int(value):
+        raise ConfigError("profile cannot be parsed")
+    return str(int(value))
+
+
+def _position(raw: object) -> tuple[tuple[str, str], ...]:
     if not isinstance(raw, dict):
         raise ConfigError("profile cannot be parsed")
     vertical = horizontal = False
-    kept: list[tuple[str, int]] = []
+    kept: list[tuple[str, str]] = []
     for key, value in raw.items():
         if key in {"top", "bottom"} and not vertical:
-            kept.append((key, int(value)))
+            kept.append((key, _length_token(value)))
             vertical = True
         elif key in {"left", "right"} and not horizontal:
-            kept.append((key, int(value)))
+            kept.append((key, _length_token(value)))
             horizontal = True
     return tuple(kept)
 
@@ -197,6 +237,12 @@ def _check(profile: Profile) -> None:
             raise ConfigError("flexible minimum is greater than maximum")
     if profile.mode == "parts" and profile.parts < 1:
         raise ConfigError("profile cannot be parsed")
+    if profile.label_bg_shape not in {"rect", "parallelogram"}:
+        raise ConfigError("profile cannot be parsed")
+    if profile.label_bg_skew_px < 0 or profile.label_bg_border_px < 0:
+        raise ConfigError("profile cannot be parsed")
+    _length_token(profile.label_bg_padding_x)
+    _length_token(profile.label_bg_padding_y)
 
 
 def profile_slug(name: str) -> str:
@@ -243,8 +289,16 @@ def load_profile(root: Path, name: str) -> Profile:
             label_position=_position(merged["label_position"]),
             label_border_px=int(merged["label_border_px"]),
             label_border_color=str(merged["label_border_color"]),
+            label_bg=bool(merged["label_bg"]),
+            label_bg_shape=str(merged["label_bg_shape"]),
+            label_bg_color=str(merged["label_bg_color"]),
+            label_bg_padding_x=_length_token(merged["label_bg_padding_x"]),
+            label_bg_padding_y=_length_token(merged["label_bg_padding_y"]),
+            label_bg_skew_px=int(merged["label_bg_skew_px"]),
+            label_bg_border_px=int(merged["label_bg_border_px"]),
+            label_bg_border_color=str(merged["label_bg_border_color"]),
         )
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, ConfigError):
         raise ConfigError("profile cannot be parsed") from None
     _check(profile)
     return profile
@@ -253,6 +307,7 @@ def load_profile(root: Path, name: str) -> Profile:
 def save_profile(root: Path, name: str, profile: Profile) -> str:
     slug = profile_slug(name)
     path = root / "profiles" / f"{slug}.yml"
+    _check(profile)
     pos = {side: value for side, value in profile.label_position}
     data = {
         "mode": profile.mode,
@@ -275,6 +330,14 @@ def save_profile(root: Path, name: str, profile: Profile) -> str:
         "label_position": pos,
         "label_border_px": profile.label_border_px,
         "label_border_color": profile.label_border_color,
+        "label_bg": profile.label_bg,
+        "label_bg_shape": profile.label_bg_shape,
+        "label_bg_color": profile.label_bg_color,
+        "label_bg_padding_x": profile.label_bg_padding_x,
+        "label_bg_padding_y": profile.label_bg_padding_y,
+        "label_bg_skew_px": profile.label_bg_skew_px,
+        "label_bg_border_px": profile.label_bg_border_px,
+        "label_bg_border_color": profile.label_bg_border_color,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")

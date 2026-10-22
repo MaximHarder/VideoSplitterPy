@@ -35,7 +35,9 @@ def test_round_trip(tmp_path: Path):
     assert profile.create_screenshot is False
     assert profile.screenshot_time == "random frame of the part"
     assert profile.screenshot_format == "jpg"
-    assert profile.label_position == (("bottom", 15), ("right", 10))
+    assert profile.label_position == (("bottom", "15"), ("right", "10"))
+    assert profile.label_bg is False
+    assert profile.label_bg_shape == "parallelogram"
     text = (root / "profiles" / "default.yml").read_text(encoding="utf-8")
     (root / "profiles" / "default.yml").write_text(text, encoding="utf-8")
     assert load_profile(root, "default") == profile
@@ -50,6 +52,54 @@ def test_soft_merge_missing_keys(tmp_path: Path):
     assert settings.replace_existing is True
 
 
+def test_soft_merge_old_profile_gets_label_bg_defaults(tmp_path: Path):
+    root = ensure(tmp_path / "cfg")
+    path = root / "profiles" / "old.yml"
+    # Minimal pre-0.2.0 profile without label_bg* keys
+    lines = [
+        line
+        for line in (root / "profiles" / "default.yml").read_text(encoding="utf-8").splitlines()
+        if not line.startswith("label_bg")
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    profile = load_profile(root, "old")
+    assert profile.label_bg is False
+    assert profile.label_bg_padding_x == "8"
+    assert profile.label_bg_shape == "parallelogram"
+
+
+def test_percent_position_round_trip(tmp_path: Path):
+    from videosplitter.store import save_profile
+
+    root = ensure(tmp_path / "cfg")
+    profile = load_profile(root, "default")
+    updated = profile.__class__(
+        **{
+            **profile.__dict__,
+            "label_position": (("top", "50%"), ("left", "50%")),
+            "label_bg_padding_x": "10%",
+            "label_bg_padding_y": "5%",
+        }
+    )
+    save_profile(root, "pct", updated)
+    loaded = load_profile(root, "pct")
+    assert loaded.label_position == (("top", "50%"), ("left", "50%"))
+    assert loaded.label_bg_padding_x == "10%"
+    assert loaded.label_bg_padding_y == "5%"
+
+
+def test_invalid_percent_and_shape(tmp_path: Path):
+    root = ensure(tmp_path / "cfg")
+    path = root / "profiles" / "bad.yml"
+    base = (root / "profiles" / "default.yml").read_text(encoding="utf-8")
+    path.write_text(base.replace("bottom: 15", "bottom: 101%"), encoding="utf-8")
+    with pytest.raises(ConfigError, match="profile cannot be parsed"):
+        load_profile(root, "bad")
+    path.write_text(base.replace("label_bg_shape: parallelogram", "label_bg_shape: chip"), encoding="utf-8")
+    with pytest.raises(ConfigError, match="profile cannot be parsed"):
+        load_profile(root, "bad")
+
+
 def test_first_position_key_wins(tmp_path: Path):
     root = ensure(tmp_path / "cfg")
     path = root / "profiles" / "both.yml"
@@ -60,7 +110,7 @@ def test_first_position_key_wins(tmp_path: Path):
         ),
         encoding="utf-8",
     )
-    assert load_profile(root, "both").label_position == (("top", 1), ("left", 2))
+    assert load_profile(root, "both").label_position == (("top", "1"), ("left", "2"))
 
 
 def test_broken_yaml_is_left_in_place(tmp_path: Path):
@@ -105,3 +155,11 @@ def test_ensure_recreates_missing_default_profile(tmp_path: Path):
 
 def test_profile_slug():
     assert profile_slug("My Profile") == "my-profile"
+
+
+def test_tui_parse_side_accepts_percent():
+    from videosplitter.tui.app import ProfileEditScreen
+
+    assert ProfileEditScreen._parse_side(None, "top:50%", {"top", "bottom"}) == ("top", "50%")
+    assert ProfileEditScreen._parse_side(None, "left:12", {"left", "right"}) == ("left", "12")
+
